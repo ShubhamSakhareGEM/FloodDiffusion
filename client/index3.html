@@ -1,0 +1,242 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FloodDiffusion: Live 3D Client</title>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #ffffff; color: #333; font-family: sans-serif; }
+        #ui-panel { 
+            position: absolute; top: 20px; left: 20px; z-index: 100; 
+            background: rgba(255, 255, 255, 0.95); padding: 20px; 
+            border: 1px solid #ccc; border-radius: 8px; width: 350px;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.1);
+        }
+        input[type="text"] { width: 100%; padding: 12px; margin-bottom: 10px; font-size: 14px; border: 2px solid #008080; border-radius: 6px; box-sizing: border-box; outline: none; transition: box-shadow 0.3s;}
+        input[type="text"]:focus { box-shadow: 0 0 8px rgba(0, 128, 128, 0.4); }
+        .metrics { font-family: monospace; font-size: 13px; margin-top: 15px; color: #555; line-height: 1.6; }
+        #status { font-weight: bold; margin-top: 5px; color: teal; }
+        #instructions { font-size: 11px; color: #666; margin-top: 15px; text-align: center; font-style: italic; border-top: 1px solid #eee; padding-top: 10px;}
+        #socket-status { position: absolute; top: 20px; right: 20px; padding: 6px 12px; background: rgba(255,255,255,0.9); border: 1px solid #ccc; border-radius: 20px; font-size: 12px; font-weight: bold; color: #666; z-index: 100; box-shadow: 0 2px 5px rgba(0,0,0,0.1);}
+    </style>
+</head>
+<body>
+    <div id="socket-status">🔌 Disconnected</div>
+
+    <div id="ui-panel">
+        <h3 style="margin-top: 0; color: #222;">Live Motion Prompt</h3>
+        <input type="text" id="promptInput" placeholder="Start typing (e.g., 'running fast')..." />
+        <div id="status">Waiting for input...</div>
+        
+        <div class="metrics" id="metricsPanel">
+            <div id="latency">Inference Latency: --</div>
+            <div id="payloadSize">Payload Size: --</div>
+        </div>
+        
+        <div id="instructions">🖱️ Left Click to Rotate | 📜 Scroll to Zoom</div>
+    </div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+    
+    <script>
+        // --- 1. SET UP THE 3D WORLD (WITH SHADOWS) ---
+        const scene = new THREE.Scene();
+        // Add a soft fog to blend the horizon
+        scene.fog = new THREE.FogExp2(0xf0f0f0, 0.05);
+        scene.background = new THREE.Color(0xf0f0f0); 
+
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        // ENABLE SHADOWS
+        renderer.shadowMap.enabled = true;
+        renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+        document.body.appendChild(renderer.domElement);
+
+        const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+        const controls = new THREE.OrbitControls(camera, renderer.domElement);
+        controls.enableDamping = true;
+        controls.dampingFactor = 0.05;
+
+        // --- 2. LIGHTING & ENVIRONMENT ---
+        const ambientLight = new THREE.AmbientLight(0xffffff, 0.4);
+        scene.add(ambientLight);
+        
+        const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
+        directionalLight.position.set(5, 10, 5);
+        // LIGHT CASTS SHADOW
+        directionalLight.castShadow = true;
+        directionalLight.shadow.mapSize.width = 2048;
+        directionalLight.shadow.mapSize.height = 2048;
+        scene.add(directionalLight);
+
+        // Solid Floor to receive shadows
+        const floorGeometry = new THREE.PlaneGeometry(100, 100);
+        const floorMaterial = new THREE.MeshStandardMaterial({ color: 0xdddddd, roughness: 0.8 });
+        const floor = new THREE.Mesh(floorGeometry, floorMaterial);
+        floor.rotation.x = -Math.PI / 2;
+        floor.receiveShadow = true; // FLOOR RECEIVES SHADOW
+        scene.add(floor);
+
+        const gridHelper = new THREE.GridHelper(100, 100, 0xcccccc, 0xcccccc);
+        scene.add(gridHelper);
+
+        // --- 3. CREATE THE 3D MANNEQUIN ---
+        const maxPoints = 22;
+        const boneConnections = [
+            0,1,   0,2,   0,3,    
+            1,4,   2,5,   3,6,    
+            4,7,   5,8,   6,9,    
+            7,10,  8,11,  9,12,   
+            9,13,  9,14,  12,15,  
+            13,16, 14,17,         
+            16,18, 17,19,         
+            18,20, 19,21          
+        ];
+
+        const jointMaterial = new THREE.MeshStandardMaterial({ color: 0x008080, roughness: 0.3, metalness: 0.2 });
+        const boneMaterial = new THREE.MeshStandardMaterial({ color: 0xbbbbbb, roughness: 0.5, metalness: 0.1 });
+
+        const jointMeshes = [];
+        const sphereGeo = new THREE.SphereGeometry(0.04, 16, 16);
+        for (let i = 0; i < maxPoints; i++) {
+            const sphere = new THREE.Mesh(sphereGeo, jointMaterial);
+            sphere.castShadow = true; // JOINTS CAST SHADOWS
+            scene.add(sphere);
+            jointMeshes.push(sphere);
+        }
+
+        const boneMeshes = [];
+        const cylinderGeo = new THREE.CylinderGeometry(0.02, 0.02, 1, 8);
+        cylinderGeo.rotateX(Math.PI / 2); 
+
+        for (let i = 0; i < boneConnections.length; i += 2) {
+            const cylinder = new THREE.Mesh(cylinderGeo, boneMaterial);
+            cylinder.castShadow = true; // BONES CAST SHADOWS
+            scene.add(cylinder);
+            boneMeshes.push(cylinder);
+        }
+
+        // --- 4. ANIMATION & STATE LOGIC ---
+        let motionData = []; 
+        let currentFrame = 0;
+        let isPlaying = false;
+        let lastFrameTime = 0;
+
+        const pA = new THREE.Vector3();
+        const pB = new THREE.Vector3();
+        const cameraTarget = new THREE.Vector3(0, 1, 0);
+
+        function animate(timestamp) {
+            requestAnimationFrame(animate);
+
+            if (isPlaying && motionData.length > 0) {
+                if (timestamp - lastFrameTime > 33) { 
+                    const frameData = motionData[currentFrame];
+
+                    // Update Spheres
+                    for (let i = 0; i < maxPoints; i++) {
+                        jointMeshes[i].position.set(frameData[i][0], frameData[i][1], frameData[i][2]);
+                    }
+
+                    // Update Cylinders
+                    let boneIndex = 0;
+                    for (let i = 0; i < boneConnections.length; i += 2) {
+                        const idxA = boneConnections[i];
+                        const idxB = boneConnections[i+1];
+
+                        pA.set(frameData[idxA][0], frameData[idxA][1], frameData[idxA][2]);
+                        pB.set(frameData[idxB][0], frameData[idxB][1], frameData[idxB][2]);
+
+                        const distance = pA.distanceTo(pB);
+                        const midPoint = pA.clone().lerp(pB, 0.5);
+
+                        const boneMesh = boneMeshes[boneIndex];
+                        boneMesh.position.copy(midPoint); 
+                        boneMesh.scale.set(1, 1, distance); 
+                        boneMesh.lookAt(pB); 
+                        
+                        boneIndex++;
+                    }
+                    
+                    // SMOOTH CHASE CAMERA
+                    const rootJoint = frameData[0];
+                    // Lerp the camera target smoothly instead of snapping it
+                    cameraTarget.lerp(new THREE.Vector3(rootJoint[0], rootJoint[1], rootJoint[2]), 0.1);
+                    controls.target.copy(cameraTarget);
+
+                    // Keep camera at a fixed offset so we can see the character move through space
+                    if (currentFrame === 0) {
+                         camera.position.set(rootJoint[0], rootJoint[1] + 1, rootJoint[2] + 4);
+                    }
+
+                    currentFrame = (currentFrame + 1) % motionData.length; 
+                    lastFrameTime = timestamp;
+                }
+            }
+            
+            controls.update(); 
+            renderer.render(scene, camera);
+        }
+        animate(0);
+
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+
+        // --- 5. WEBSOCKET PIPELINE ---
+        const socketStatus = document.getElementById('socket-status');
+        const statusText = document.getElementById('status');
+        const ws = new WebSocket('wss://immodestly-tenacious-kraig.ngrok-free.dev/api/generate_stream');
+
+        ws.onopen = () => {
+            socketStatus.innerHTML = "🟢 Live TCP Connection";
+            socketStatus.style.color = "green";
+        };
+
+        ws.onclose = () => {
+            socketStatus.innerHTML = "🔴 Disconnected";
+            socketStatus.style.color = "red";
+        };
+
+        ws.onmessage = (event) => {
+            const data = JSON.parse(event.data);
+            
+            if (data.status === "success" && data.data) {
+                motionData = data.data; 
+                currentFrame = 0;
+                isPlaying = true;
+
+                const kbSize = (new Blob([event.data]).size / 1024).toFixed(2);
+                document.getElementById('latency').textContent = `Inference Latency: ${data.latency_ms} ms`;
+                document.getElementById('payloadSize').textContent = `Payload Size: ${kbSize} KB`;
+                statusText.textContent = "Rendering...";
+                statusText.style.color = "teal";
+            }
+        };
+
+        let typingTimer;
+        const inputField = document.getElementById('promptInput');
+
+        inputField.addEventListener('input', () => {
+            clearTimeout(typingTimer);
+            statusText.textContent = "Typing...";
+            statusText.style.color = "#ff8c00";
+
+            typingTimer = setTimeout(() => {
+                const promptText = inputField.value.trim();
+                
+                if (promptText.length > 0 && ws.readyState === WebSocket.OPEN) {
+                    statusText.textContent = "Transmitting to Edge GPU...";
+                    ws.send(JSON.stringify({ prompt: promptText }));
+                } else if (promptText.length === 0) {
+                    statusText.textContent = "Waiting for input...";
+                    statusText.style.color = "teal";
+                }
+            }, 300); // Reduced debounce for a slightly snappier feel
+        });
+    </script>
+</body>
+</html>

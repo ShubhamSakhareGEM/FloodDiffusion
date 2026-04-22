@@ -1,0 +1,236 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FloodDiffusion: 3D Client</title>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #ffffff; color: #333; font-family: sans-serif; }
+        #ui-panel { 
+            position: absolute; top: 20px; left: 20px; z-index: 100; 
+            background: rgba(255, 255, 255, 0.9); padding: 20px; 
+            border: 1px solid #ccc; border-radius: 8px; max-width: 350px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+        }
+        input[type="text"] { width: 100%; padding: 10px; margin-bottom: 15px; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box; }
+        button { padding: 10px 15px; background: teal; color: white; border: none; border-radius: 4px; cursor: pointer; width: 100%; font-weight: bold;}
+        button:hover { background: #006666; }
+        .metrics { font-family: monospace; font-size: 13px; margin-top: 15px; color: #555; line-height: 1.5; }
+        #status { font-weight: bold; margin-top: 15px; color: teal; text-align: center; }
+        #instructions { font-size: 11px; color: #666; margin-top: 10px; text-align: center; font-style: italic; }
+    </style>
+</head>
+<body>
+    <div id="ui-panel">
+        <h3 style="margin-top: 0;">Motion Generator</h3>
+        <input type="text" id="promptInput" value="A person walking forward" />
+        <button onclick="sendRequest()">Generate & Render</button>
+        <div id="status">Ready</div>
+        
+        <div class="metrics" id="metricsPanel" style="display: none;">
+            <div id="latency">Latency: --</div>
+            <div id="payloadSize">Size: --</div>
+            <div id="frames">Frames: --</div>
+        </div>
+        <div id="instructions">🖱️ Left Click to Rotate | 📜 Scroll to Zoom</div>
+    </div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+    
+    <script>
+        // 1. SET UP THE 3D WORLD
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color(0xf0f0f0); 
+
+        // Lighting is now REQUIRED so we can see the 3D volume of the cylinders and spheres
+        const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
+        scene.add(ambientLight);
+        
+        const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
+        directionalLight.position.set(5, 10, 5);
+        scene.add(directionalLight);
+
+        // Grid floor
+        const gridHelper = new THREE.GridHelper(20, 20, 0xcccccc, 0xdddddd);
+        scene.add(gridHelper);
+
+        const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+        
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        document.body.appendChild(renderer.domElement);
+
+        const controls = new THREE.OrbitControls(camera, renderer.domElement);
+        controls.enableDamping = true;
+        controls.dampingFactor = 0.05;
+
+        // 2. CREATE THE 3D MANNEQUIN (SPHERES & CYLINDERS)
+        const maxPoints = 22;
+        const boneConnections = [
+            0,1,   0,2,   0,3,    
+            1,4,   2,5,   3,6,    
+            4,7,   5,8,   6,9,    
+            7,10,  8,11,  9,12,   
+            9,13,  9,14,  12,15,  
+            13,16, 14,17,         
+            16,18, 17,19,         
+            18,20, 19,21          
+        ];
+
+        // Materials: Sleek grey bones with teal joints
+        const jointMaterial = new THREE.MeshStandardMaterial({ color: 0x008080, roughness: 0.3, metalness: 0.2 });
+        const boneMaterial = new THREE.MeshStandardMaterial({ color: 0xdddddd, roughness: 0.5, metalness: 0.1 });
+
+        // Create 22 Spheres for the joints
+        const jointMeshes = [];
+        const sphereGeo = new THREE.SphereGeometry(0.04, 16, 16);
+        for (let i = 0; i < maxPoints; i++) {
+            const sphere = new THREE.Mesh(sphereGeo, jointMaterial);
+            scene.add(sphere);
+            jointMeshes.push(sphere);
+        }
+
+        // Create Cylinders for the bones
+        const boneMeshes = [];
+        // A base cylinder pointing UP (Y-axis). 
+        // We rotate it 90 degrees so it points FORWARD (Z-axis). This makes Math easier later.
+        const cylinderGeo = new THREE.CylinderGeometry(0.02, 0.02, 1, 8);
+        cylinderGeo.rotateX(Math.PI / 2); 
+
+        // We have boneConnections.length / 2 total bones
+        for (let i = 0; i < boneConnections.length; i += 2) {
+            const cylinder = new THREE.Mesh(cylinderGeo, boneMaterial);
+            scene.add(cylinder);
+            boneMeshes.push(cylinder);
+        }
+
+        // 3. ANIMATION & CAMERA STATE
+        let motionData = []; 
+        let currentFrame = 0;
+        let isPlaying = false;
+        let lastFrameTime = 0;
+        let prevRoot = { x: 0, y: 0, z: 0 }; 
+
+        // 4. NETWORK REQUEST TO FLASK
+        async function sendRequest() {
+            const prompt = document.getElementById('promptInput').value;
+            const statusEl = document.getElementById('status');
+            const metrics = document.getElementById('metricsPanel');
+            
+            statusEl.textContent = "Processing on M1 Edge...";
+            statusEl.style.color = "#ff8c00";
+            isPlaying = false; 
+
+            const startTime = performance.now();
+
+            try {
+                const response = await fetch('http://127.0.0.1:8080/api/generate_stream', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ prompt: prompt })
+                });
+
+                const data = await response.json();
+                const endTime = performance.now();
+                
+                const roundTripTime = (endTime - startTime).toFixed(2);
+                const kbSize = (new Blob([JSON.stringify(data)]).size / 1024).toFixed(2);
+
+                document.getElementById('latency').textContent = `Round-Trip: ${roundTripTime} ms`;
+                document.getElementById('payloadSize').textContent = `Payload: ${kbSize} KB`;
+                document.getElementById('frames').textContent = `Frames: ${data.tensor_shape[0]}`;
+                metrics.style.display = "block";
+
+                if (data.status === "success" && data.data) {
+                    motionData = data.data; 
+                    currentFrame = 0;
+                    isPlaying = true;
+                    statusEl.textContent = "Rendering Active";
+                    statusEl.style.color = "teal";
+                }
+
+            } catch (error) {
+                statusEl.textContent = "Network Error";
+                statusEl.style.color = "red";
+                console.error(error);
+            }
+        }
+
+        // Helper vector objects to prevent memory leaks in the render loop
+        const pA = new THREE.Vector3();
+        const pB = new THREE.Vector3();
+
+        // 5. BROWSER RENDER LOOP
+        function animate(timestamp) {
+            requestAnimationFrame(animate);
+
+            if (isPlaying && motionData.length > 0) {
+                if (timestamp - lastFrameTime > 33) { 
+                    const frameData = motionData[currentFrame];
+
+                    // 1. Update Joint (Sphere) Positions
+                    for (let i = 0; i < maxPoints; i++) {
+                        jointMeshes[i].position.set(frameData[i][0], frameData[i][1], frameData[i][2]);
+                    }
+
+                    // 2. Update Bone (Cylinder) Positions, Lengths, and Rotations
+                    let boneIndex = 0;
+                    for (let i = 0; i < boneConnections.length; i += 2) {
+                        const idxA = boneConnections[i];
+                        const idxB = boneConnections[i+1];
+
+                        pA.set(frameData[idxA][0], frameData[idxA][1], frameData[idxA][2]);
+                        pB.set(frameData[idxB][0], frameData[idxB][1], frameData[idxB][2]);
+
+                        const distance = pA.distanceTo(pB);
+                        
+                        // Find the exact middle point between Joint A and Joint B
+                        const midPoint = pA.clone().lerp(pB, 0.5);
+
+                        const boneMesh = boneMeshes[boneIndex];
+                        boneMesh.position.copy(midPoint); // Move cylinder to the middle
+                        boneMesh.scale.set(1, 1, distance); // Stretch cylinder to reach both joints
+                        boneMesh.lookAt(pB); // Rotate cylinder to point directly at Joint B
+                        
+                        boneIndex++;
+                    }
+                    
+                    // 3. Camera Tracking Logic
+                    const rootX = frameData[0][0];
+                    const rootY = frameData[0][1];
+                    const rootZ = frameData[0][2];
+
+                    if (currentFrame === 0) {
+                        camera.position.set(rootX, rootY + 0.5, rootZ + 3.5);
+                    } else {
+                        const dx = rootX - prevRoot.x;
+                        const dy = rootY - prevRoot.y;
+                        const dz = rootZ - prevRoot.z;
+                        
+                        camera.position.x += dx;
+                        camera.position.y += dy;
+                        camera.position.z += dz;
+                    }
+
+                    controls.target.set(rootX, rootY, rootZ);
+                    prevRoot = { x: rootX, y: rootY, z: rootZ };
+
+                    currentFrame = (currentFrame + 1) % motionData.length; 
+                    lastFrameTime = timestamp;
+                }
+            }
+            
+            controls.update(); 
+            renderer.render(scene, camera);
+        }
+        animate(0);
+
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+    </script>
+</body>
+</html>
