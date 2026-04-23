@@ -111,7 +111,7 @@
         const boneMeshes = [];
         // UPGRADE: Use CapsuleGeometry instead of thin cylinders for realistic body volume
         // Arguments: radius, length, cap segments, radial segments
-        const capsuleGeo = new THREE.CapsuleGeometry(0.06, 1, 8, 16);
+        const capsuleGeo = new THREE.CylinderGeometry(0.06, 0.06, 1, 16);
         capsuleGeo.rotateX(Math.PI / 2); 
 
         for (let i = 0; i < boneConnections.length; i += 2) {
