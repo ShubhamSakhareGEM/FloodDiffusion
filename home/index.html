@@ -205,10 +205,14 @@
             socketStatus.style.color = "red";
         };
 
+        // --- INSIDE index.html ---
+        let currentTicket = 0; // Keep track of the newest request
+
         ws.onmessage = (event) => {
             const data = JSON.parse(event.data);
             
-            if (data.status === "success" && data.data) {
+            // SECURITY CHECK: Only play the animation if the ticket matches our latest request!
+            if (data.status === "success" && data.ticket === currentTicket && data.data) {
                 motionData = data.data; 
                 currentFrame = 0;
                 isPlaying = true;
@@ -218,12 +222,15 @@
                 document.getElementById('payloadSize').textContent = `Payload Size: ${kbSize} KB`;
                 statusText.textContent = "Rendering...";
                 statusText.style.color = "teal";
+            } else if (data.ticket !== currentTicket) {
+                console.log(`Dropped outdated packet. Ticket: ${data.ticket}, Current: ${currentTicket}`);
             }
         };
 
         let typingTimer;
         const inputField = document.getElementById('promptInput');
 
+        // Back to live listening!
         inputField.addEventListener('input', () => {
             clearTimeout(typingTimer);
             statusText.textContent = "Typing...";
@@ -233,13 +240,16 @@
                 const promptText = inputField.value.trim();
                 
                 if (promptText.length > 0 && ws.readyState === WebSocket.OPEN) {
+                    currentTicket++; // Generate a new ticket number for this specific word
+                    
                     statusText.textContent = "Transmitting to Edge GPU...";
-                    ws.send(JSON.stringify({ prompt: promptText }));
+                    // Send the text AND the ticket number
+                    ws.send(JSON.stringify({ prompt: promptText, ticket: currentTicket }));
                 } else if (promptText.length === 0) {
                     statusText.textContent = "Waiting for input...";
                     statusText.style.color = "teal";
                 }
-            }, 300); // Reduced debounce for a slightly snappier feel
+            }, 400); // 400ms debounce: waits just long enough for you to finish a word
         });
     </script>
 </body>
