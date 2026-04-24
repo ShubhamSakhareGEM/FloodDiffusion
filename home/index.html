@@ -171,25 +171,35 @@
 
                     // Update Spheres
                     for (let i = 0; i < maxPoints; i++) {
-                        // 1. Original Underlying Skeleton Update
+                        // 1. Update your robotic skeleton (Positions)
                         jointMeshes[i].position.set(frameData[i][0], frameData[i][1], frameData[i][2]);
                         
-                        // 2. SMPL MESH UPDATE (The IK-Bypass Hack)
+                        // 2. Update the Rigged Mesh (Rotations)
                         if (smplMesh && smplBones[i]) {
-                            // Grab the AI's exact absolute coordinate
-                            const targetWorldPos = new THREE.Vector3(frameData[i][0], frameData[i][1], frameData[i][2]);
-                            
-                            // Convert the absolute coordinate into a local offset so the skeleton doesn't shatter
-                            if (smplBones[i].parent) {
-                                smplBones[i].parent.updateMatrixWorld(); 
-                                smplBones[i].parent.worldToLocal(targetWorldPos);
+                            // The Root bone (Hips/Pelvis) is the ONLY bone that moves its absolute position
+                            if (i === 0) { 
+                                smplBones[i].position.set(frameData[i][0], frameData[i][1], frameData[i][2]);
+                            } else {
+                                // For all other joints, we calculate the rotational vector
+                                // We need the AI's current joint position and its parent joint position
+                                // (Note: this assumes boneConnections array maps perfectly to the smplBones hierarchy)
+                                
+                                const currentAIPos = new THREE.Vector3(frameData[i][0], frameData[i][1], frameData[i][2]);
+                                
+                                // To rotate a bone, we make it "look at" the next joint in the chain
+                                // Convert the target world position into the bone's local space
+                                const localTarget = smplBones[i].parent.worldToLocal(currentAIPos.clone());
+                                
+                                // Create a rotation matrix pointing to the local target
+                                const targetMatrix = new THREE.Matrix4();
+                                targetMatrix.lookAt(smplBones[i].position, localTarget, smplBones[i].up);
+                                
+                                // Apply the math to the bone's quaternion
+                                smplBones[i].quaternion.setFromRotationMatrix(targetMatrix);
                             }
-                            
-                            // Force the bone to stretch to the exact AI position
-                            smplBones[i].position.copy(targetWorldPos);
                         }
                     }
-
+                    
                     // Update Cylinders
                     let boneIndex = 0;
                     for (let i = 0; i < boneConnections.length; i += 2) {
