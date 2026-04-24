@@ -82,8 +82,7 @@
 
         const gridHelper = new THREE.GridHelper(100, 100, 0xcccccc, 0xcccccc);
         scene.add(gridHelper);
-
-        // --- 3. CREATE THE 3D MANNEQUIN (UPGRADED MESH) ---
+// --- 3. CREATE THE 3D MANNEQUIN (UPGRADED MESH) ---
         const maxPoints = 22;
         const boneConnections = [
             0,1,   0,2,   0,3,    
@@ -96,12 +95,10 @@
             18,20, 19,21          
         ];
 
-        // Give the mesh a sleek, modern plastic look
         const jointMaterial = new THREE.MeshStandardMaterial({ color: 0x333333, roughness: 0.2, metalness: 0.8 });
         const boneMaterial = new THREE.MeshStandardMaterial({ color: 0xe0e0e0, roughness: 0.5, metalness: 0.1 });
 
         const jointMeshes = [];
-        // Make joints larger to look like robotic hinges
         const sphereGeo = new THREE.SphereGeometry(0.08, 32, 32); 
         for (let i = 0; i < maxPoints; i++) {
             const sphere = new THREE.Mesh(sphereGeo, jointMaterial);
@@ -111,8 +108,6 @@
         }
 
         const boneMeshes = [];
-        // UPGRADE: Use CapsuleGeometry instead of thin cylinders for realistic body volume
-        // Arguments: radius, length, cap segments, radial segments
         const capsuleGeo = new THREE.CylinderGeometry(0.06, 0.06, 1, 16);
         capsuleGeo.rotateX(Math.PI / 2); 
 
@@ -123,33 +118,28 @@
             boneMeshes.push(boneMesh);
         }
 
-        // --- 3.5 LOAD SMPL MESH ---
+        // --- 3.5 LOAD SMPL MESH (BESIDES THE POSE) ---
         let smplMesh = null;
-        let smplBones = [];
 
         const gltfLoader = new THREE.GLTFLoader();
-        // CRITICAL: You must have a file named 'smpl.glb' in the same folder as this HTML file!
         gltfLoader.load('smpl.glb', (gltf) => {
             smplMesh = gltf.scene;
             
-            // Extract all bones from the rigged mesh
+            // Move the mesh 1.5 meters to the left so it stands "besides" the AI pose!
+            smplMesh.position.set(-1.5, 0, 0);
+            
             smplMesh.traverse((child) => {
                 if (child.isMesh) {
                     child.castShadow = true;
-                    // Make it semi-transparent to see the AI joints inside!
-                    child.material.transparent = true;
-                    child.material.opacity = 0.85; 
-                    child.material.color.setHex(0xaaccff);
-                }
-                if (child.isBone) {
-                    smplBones.push(child);
+                    // Give it a nice clean blue look
+                    child.material.color.setHex(0x88bbff);
                 }
             });
 
             scene.add(smplMesh);
-            console.log("SMPL Mesh Loaded. Bones found:", smplBones.length);
+            console.log("SMPL Mesh Loaded and placed beside the pose.");
         }, undefined, (error) => {
-            console.error("Could not load smpl.glb. Ensure the file is in the root directory.", error);
+            console.error("Could not load smpl.glb.", error);
         });
         
         // --- 4. ANIMATION & STATE LOGIC ---
@@ -169,19 +159,11 @@
                 if (timestamp - lastFrameTime > 33) { 
                     const frameData = motionData[currentFrame];
 
-                    // Update Spheres (Only the Robotic Skeleton)
+                    // ONLY update the robotic skeleton, completely bypassing the mesh math!
                     for (let i = 0; i < maxPoints; i++) {
-                        // 1. Update your robotic skeleton (Positions)
                         jointMeshes[i].position.set(frameData[i][0], frameData[i][1], frameData[i][2]);
                     }
                     
-                    // Keep the Mesh in the scene, but offset it slightly so it stands "besides" the pose!
-                    if (smplMesh && currentFrame === 1) {
-                        // Move it 1.5 meters to the left so it doesn't overlap the robot
-                        smplMesh.position.set(-1.5, 0, 0); 
-                    }
-                    
-                    // Update Cylinders
                     let boneIndex = 0;
                     for (let i = 0; i < boneConnections.length; i += 2) {
                         const idxA = boneConnections[i];
@@ -201,13 +183,10 @@
                         boneIndex++;
                     }
                     
-                    // SMOOTH CHASE CAMERA
                     const rootJoint = frameData[0];
-                    // Lerp the camera target smoothly instead of snapping it
                     cameraTarget.lerp(new THREE.Vector3(rootJoint[0], rootJoint[1], rootJoint[2]), 0.1);
                     controls.target.copy(cameraTarget);
 
-                    // Keep camera at a fixed offset so we can see the character move through space
                     if (currentFrame === 0) {
                          camera.position.set(rootJoint[0], rootJoint[1] + 1, rootJoint[2] + 4);
                     }
@@ -227,7 +206,7 @@
             camera.updateProjectionMatrix();
             renderer.setSize(window.innerWidth, window.innerHeight);
         });
-
+        
         // --- 5. WEBSOCKET PIPELINE ---
         const socketStatus = document.getElementById('socket-status');
         const statusText = document.getElementById('status');
