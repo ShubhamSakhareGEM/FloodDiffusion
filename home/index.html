@@ -82,7 +82,8 @@
 
         const gridHelper = new THREE.GridHelper(100, 100, 0xcccccc, 0xcccccc);
         scene.add(gridHelper);
-        
+
+
         // ============================================================
         // 3. SKELETON (placed at x = +1.5, right side)
         // ============================================================
@@ -137,12 +138,16 @@
         // ============================================================
         const SMPL_OFFSET_X = -1.5;
  
-        let smplSkinnedMesh = null;    // the SkinnedMesh node
-        let smplSkeleton = null;       // its Skeleton
-        let restLocalDirs = [];        // rest-pose bone directions captured on load
-        let smplLoaded = false;
+        let smplSkinnedMesh = null;
+        let smplSkeleton    = null;
+        let restLocalDirs   = [];
+        let smplLoaded      = false;
  
-        // Reusable vectors to avoid per-frame GC pressure
+        // This matrix converts FloodDiffusion world-space joint positions
+        // into the SMPL scene's LOCAL space (fixes Blender Z-up vs Y-up mismatch)
+        let smplInvRotMatrix = new THREE.Matrix4();
+ 
+        // Reusable vectors
         const _v1 = new THREE.Vector3();
         const _v2 = new THREE.Vector3();
  
@@ -150,53 +155,47 @@
  
         gltfLoader.load('smpl.glb', (gltf) => {
  
-            // ── Find the SkinnedMesh inside the GLB ──────────────────
+            // ── Find the SkinnedMesh ──────────────────────────────────
             gltf.scene.traverse((child) => {
                 if (child.isSkinnedMesh && !smplSkinnedMesh) {
                     smplSkinnedMesh = child;
                     smplSkeleton    = child.skeleton;
- 
-                    // Nice blue-tinted material
-                    child.material = new THREE.MeshStandardMaterial({
-                        color: 0x88bbff,
-                        roughness: 0.5,
-                        metalness: 0.1,
-                        skinning: true   // CRITICAL: enables GPU skinning
+                    child.material  = new THREE.MeshStandardMaterial({
+                        color: 0x88bbff, roughness: 0.5, metalness: 0.1, skinning: true
                     });
-                    child.castShadow    = true;
-                    child.receiveShadow = false;
+                    child.castShadow = true;
                 }
             });
  
             if (!smplSkinnedMesh) {
-                console.warn("[SMPL] ⚠️ No SkinnedMesh found in smpl.glb. " +
-                             "Make sure you export a rigged mesh (see instructions).");
                 document.getElementById('smplStatus').textContent = "SMPL Mesh: ⚠️ Not rigged";
-                // Fallback: just show it statically as before
                 gltf.scene.position.set(SMPL_OFFSET_X, 0, 0);
                 scene.add(gltf.scene);
                 return;
             }
  
-            // ── Log bone names so you can verify the order ───────────
-            console.log("[SMPL] Bone names & count:", smplSkeleton.bones.map((b,i) => `${i}: ${b.name}`));
- 
-            // ── Capture rest-pose local bone directions ───────────────
-            // bones[i].position = offset from parent in local rest space.
-            // Normalize this to get the "pointing direction" of the bone.
-            restLocalDirs = smplSkeleton.bones.map(bone => {
-                const d = bone.position.clone().normalize();
-                return d;
-            });
- 
-            // Place the whole scene-graph at the SMPL offset
+            // ── Place scene, then extract its rotation ────────────────
+            // Blender exports with a -90° X rotation to convert Z-up → Y-up.
+            // We need the inverse of that rotation to bring FloodDiffusion's
+            // Y-up joint positions into the bone's local coordinate space.
             gltf.scene.position.set(SMPL_OFFSET_X, 0, 0);
             scene.add(gltf.scene);
+            gltf.scene.updateWorldMatrix(true, true);
+ 
+            // Extract only the rotation part (no translation) of the inverse
+            const fullInv = new THREE.Matrix4().copy(gltf.scene.matrixWorld).invert();
+            smplInvRotMatrix.extractRotation(fullInv);
+ 
+            // ── Log bones to verify ordering ─────────────────────────
+            console.log("[SMPL] Bones:", smplSkeleton.bones.map((b, i) => `${i}: ${b.name}`).join(', '));
+ 
+            // ── Capture rest-pose local bone directions ───────────────
+            // IMPORTANT: read AFTER the scene is added so matrixWorld is correct
+            restLocalDirs = smplSkeleton.bones.map(bone => bone.position.clone().normalize());
  
             smplLoaded = true;
             document.getElementById('smplStatus').textContent =
                 `SMPL Mesh: ✅ Rigged (${smplSkeleton.bones.length} bones)`;
-            console.log("[SMPL] ✅ Rigged mesh loaded successfully.");
  
         }, undefined, (err) => {
             console.error("[SMPL] Failed to load smpl.glb:", err);
@@ -205,10 +204,22 @@
  
         // ============================================================
         // 6. APPLY POSE TO SMPL SKELETON FROM JOINT POSITIONS
-        //    Uses forward-kinematics top-down pass.
-        //    frameData shape: [22][3] — world-space joint positions.
+        //    Forward-kinematics top-down pass.
+        //    frameData shape: [22][3] — Y-up world-space joint positions.
+        //
+        //    KEY FIX: Blender exports with a -90° X rotation baked into
+        //    gltf.scene to convert its Z-up world to glTF Y-up.
+        //    All bone local positions live in Blender's Z-up space BEFORE
+        //    that scene rotation. So we must transform FloodDiffusion's
+        //    Y-up positions through smplInvRotMatrix before comparing
+        //    them to rest-pose bone directions.
         // ============================================================
-        const _worldRots = new Array(22); // accumulated world rotations per bone
+        const _worldRots = new Array(22);
+ 
+        // Convert a FloodDiffusion Y-up world joint into SMPL scene local space
+        function toLocal(x, y, z) {
+            return new THREE.Vector3(x, y, z).applyMatrix4(smplInvRotMatrix);
+        }
  
         function applyPoseToSMPL(frameData) {
             if (!smplLoaded || !smplSkeleton) return;
@@ -216,43 +227,35 @@
             const bones = smplSkeleton.bones;
             const n     = Math.min(22, bones.length);
  
+            // Pre-convert all joints to SMPL local space once per frame
+            const localJoints = [];
+            for (let i = 0; i < n; i++) {
+                localJoints.push(toLocal(frameData[i][0], frameData[i][1], frameData[i][2]));
+            }
+ 
             // ── ROOT BONE ────────────────────────────────────────────
-            // Translate so the pelvis matches the SMPL offset column.
-            // frameData[0] is in skeleton-space (centered at 0,0,0).
-            // The gltf.scene is already shifted by SMPL_OFFSET_X, so
-            // we feed the raw joint positions directly.
-            bones[0].position.set(
-                frameData[0][0],
-                frameData[0][1],
-                frameData[0][2]
-            );
+            // Set pelvis position in scene-local space
+            bones[0].position.copy(localJoints[0]);
             bones[0].quaternion.identity();
             _worldRots[0] = new THREE.Quaternion(); // identity
  
-            // ── CHILD BONES (top-down, parent before child) ──────────
+            // ── CHILD BONES ──────────────────────────────────────────
             for (let i = 1; i < n; i++) {
                 const p        = SMPL_PARENTS[i];
                 const Q_parent = _worldRots[p];
- 
                 const restLocal = restLocalDirs[i];
  
-                // Skip degenerate zero-length rest bones (shouldn't happen)
                 if (restLocal.lengthSq() < 1e-6) {
                     bones[i].quaternion.identity();
                     _worldRots[i] = Q_parent.clone();
                     continue;
                 }
  
-                // Rest direction of this bone in WORLD space
-                // = parent's accumulated world rotation × local rest dir
+                // Rest direction of bone i in world space (within SMPL local frame)
                 _v1.copy(restLocal).applyQuaternion(Q_parent);
  
-                // Target direction = frameData[i] - frameData[p] (world space)
-                _v2.set(
-                    frameData[i][0] - frameData[p][0],
-                    frameData[i][1] - frameData[p][1],
-                    frameData[i][2] - frameData[p][2]
-                );
+                // Target direction: parent → child in SMPL local space
+                _v2.copy(localJoints[i]).sub(localJoints[p]);
  
                 if (_v2.lengthSq() < 1e-6) {
                     bones[i].quaternion.identity();
@@ -261,17 +264,15 @@
                 }
                 _v2.normalize();
  
-                // Q_needed rotates rest world dir → target world dir
+                // Rotation that swings rest dir → target dir
                 const Q_needed = new THREE.Quaternion().setFromUnitVectors(_v1, _v2);
  
-                // Local rotation in parent's space:
-                //   world_rot_i = Q_parent × local_rot_i
-                //   local_rot_i = Q_parent⁻¹ × Q_needed
+                // Convert to local bone space: localRot = Q_parent⁻¹ × Q_needed
                 const localRot = Q_parent.clone().invert().multiply(Q_needed);
                 bones[i].quaternion.copy(localRot);
  
-                // Propagate world rotation to children
-                _worldRots[i] = Q_needed; // = Q_parent × localRot ✓
+                // Accumulate for children: world_rot_i = Q_needed
+                _worldRots[i] = Q_needed;
             }
  
             smplSkeleton.update();
@@ -346,7 +347,7 @@
             camera.updateProjectionMatrix();
             renderer.setSize(window.innerWidth, window.innerHeight);
         });
- 
+        
         // --- 5. WEBSOCKET PIPELINE ---
         const socketStatus = document.getElementById('socket-status');
         const statusText = document.getElementById('status');
