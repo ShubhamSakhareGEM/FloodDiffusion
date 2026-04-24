@@ -82,131 +82,271 @@
 
         const gridHelper = new THREE.GridHelper(100, 100, 0xcccccc, 0xcccccc);
         scene.add(gridHelper);
-// --- 3. CREATE THE 3D MANNEQUIN (UPGRADED MESH) ---
+        
+        // ============================================================
+        // 3. SKELETON (placed at x = +1.5, right side)
+        // ============================================================
+        const SKELETON_OFFSET_X = 1.5;
+ 
         const maxPoints = 22;
         const boneConnections = [
-            0,1,   0,2,   0,3,    
-            1,4,   2,5,   3,6,    
-            4,7,   5,8,   6,9,    
-            7,10,  8,11,  9,12,   
-            9,13,  9,14,  12,15,  
-            13,16, 14,17,         
-            16,18, 17,19,         
-            18,20, 19,21          
+            0,1,  0,2,  0,3,
+            1,4,  2,5,  3,6,
+            4,7,  5,8,  6,9,
+            7,10, 8,11, 9,12,
+            9,13, 9,14, 12,15,
+            13,16,14,17,
+            16,18,17,19,
+            18,20,19,21
         ];
-
+ 
         const jointMaterial = new THREE.MeshStandardMaterial({ color: 0x333333, roughness: 0.2, metalness: 0.8 });
-        const boneMaterial = new THREE.MeshStandardMaterial({ color: 0xe0e0e0, roughness: 0.5, metalness: 0.1 });
-
+        const boneMaterial  = new THREE.MeshStandardMaterial({ color: 0xe0e0e0, roughness: 0.5, metalness: 0.1 });
+ 
         const jointMeshes = [];
-        const sphereGeo = new THREE.SphereGeometry(0.08, 32, 32); 
         for (let i = 0; i < maxPoints; i++) {
-            const sphere = new THREE.Mesh(sphereGeo, jointMaterial);
-            sphere.castShadow = true; 
-            scene.add(sphere);
-            jointMeshes.push(sphere);
+            const s = new THREE.Mesh(new THREE.SphereGeometry(0.08, 16, 16), jointMaterial);
+            s.castShadow = true;
+            scene.add(s);
+            jointMeshes.push(s);
         }
-
+ 
         const boneMeshes = [];
         const capsuleGeo = new THREE.CylinderGeometry(0.06, 0.06, 1, 16);
-        capsuleGeo.rotateX(Math.PI / 2); 
-
+        capsuleGeo.rotateX(Math.PI / 2);
         for (let i = 0; i < boneConnections.length; i += 2) {
-            const boneMesh = new THREE.Mesh(capsuleGeo, boneMaterial);
-            boneMesh.castShadow = true; 
-            scene.add(boneMesh);
-            boneMeshes.push(boneMesh);
+            const b = new THREE.Mesh(capsuleGeo, boneMaterial);
+            b.castShadow = true;
+            scene.add(b);
+            boneMeshes.push(b);
         }
-
-        // --- 3.5 LOAD SMPL MESH (BESIDES THE POSE) ---
-        let smplMesh = null;
-
+ 
+        // ============================================================
+        // 4. SMPL PARENT HIERARCHY (22 joints, standard SMPL-22)
+        // ============================================================
+        // Joint index → parent index (-1 = root)
+        // 0:Pelvis 1:L_Hip 2:R_Hip 3:Spine1 4:L_Knee 5:R_Knee
+        // 6:Spine2 7:L_Ankle 8:R_Ankle 9:Spine3 10:L_Foot 11:R_Foot
+        // 12:Neck 13:L_Collar 14:R_Collar 15:Head
+        // 16:L_Shoulder 17:R_Shoulder 18:L_Elbow 19:R_Elbow
+        // 20:L_Wrist 21:R_Wrist
+        const SMPL_PARENTS = [-1, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 9, 9, 12, 13, 14, 16, 17, 18, 19];
+ 
+        // ============================================================
+        // 5. SMPL RIGGED MESH (placed at x = -1.5, left side)
+        // ============================================================
+        const SMPL_OFFSET_X = -1.5;
+ 
+        let smplSkinnedMesh = null;    // the SkinnedMesh node
+        let smplSkeleton = null;       // its Skeleton
+        let restLocalDirs = [];        // rest-pose bone directions captured on load
+        let smplLoaded = false;
+ 
+        // Reusable vectors to avoid per-frame GC pressure
+        const _v1 = new THREE.Vector3();
+        const _v2 = new THREE.Vector3();
+ 
         const gltfLoader = new THREE.GLTFLoader();
+ 
         gltfLoader.load('smpl.glb', (gltf) => {
-            smplMesh = gltf.scene;
-            
-            // Move the mesh 1.5 meters to the left so it stands "besides" the AI pose!
-            smplMesh.position.set(-1.5, 0, 0);
-            
-            smplMesh.traverse((child) => {
-                if (child.isMesh) {
-                    child.castShadow = true;
-                    // Give it a nice clean blue look
-                    child.material.color.setHex(0x88bbff);
+ 
+            // ── Find the SkinnedMesh inside the GLB ──────────────────
+            gltf.scene.traverse((child) => {
+                if (child.isSkinnedMesh && !smplSkinnedMesh) {
+                    smplSkinnedMesh = child;
+                    smplSkeleton    = child.skeleton;
+ 
+                    // Nice blue-tinted material
+                    child.material = new THREE.MeshStandardMaterial({
+                        color: 0x88bbff,
+                        roughness: 0.5,
+                        metalness: 0.1,
+                        skinning: true   // CRITICAL: enables GPU skinning
+                    });
+                    child.castShadow    = true;
+                    child.receiveShadow = false;
                 }
             });
-
-            scene.add(smplMesh);
-            console.log("SMPL Mesh Loaded and placed beside the pose.");
-        }, undefined, (error) => {
-            console.error("Could not load smpl.glb.", error);
+ 
+            if (!smplSkinnedMesh) {
+                console.warn("[SMPL] ⚠️ No SkinnedMesh found in smpl.glb. " +
+                             "Make sure you export a rigged mesh (see instructions).");
+                document.getElementById('smplStatus').textContent = "SMPL Mesh: ⚠️ Not rigged";
+                // Fallback: just show it statically as before
+                gltf.scene.position.set(SMPL_OFFSET_X, 0, 0);
+                scene.add(gltf.scene);
+                return;
+            }
+ 
+            // ── Log bone names so you can verify the order ───────────
+            console.log("[SMPL] Bone names & count:", smplSkeleton.bones.map((b,i) => `${i}: ${b.name}`));
+ 
+            // ── Capture rest-pose local bone directions ───────────────
+            // bones[i].position = offset from parent in local rest space.
+            // Normalize this to get the "pointing direction" of the bone.
+            restLocalDirs = smplSkeleton.bones.map(bone => {
+                const d = bone.position.clone().normalize();
+                return d;
+            });
+ 
+            // Place the whole scene-graph at the SMPL offset
+            gltf.scene.position.set(SMPL_OFFSET_X, 0, 0);
+            scene.add(gltf.scene);
+ 
+            smplLoaded = true;
+            document.getElementById('smplStatus').textContent =
+                `SMPL Mesh: ✅ Rigged (${smplSkeleton.bones.length} bones)`;
+            console.log("[SMPL] ✅ Rigged mesh loaded successfully.");
+ 
+        }, undefined, (err) => {
+            console.error("[SMPL] Failed to load smpl.glb:", err);
+            document.getElementById('smplStatus').textContent = "SMPL Mesh: ❌ Load failed";
         });
-        
-        // --- 4. ANIMATION & STATE LOGIC ---
-        let motionData = []; 
+ 
+        // ============================================================
+        // 6. APPLY POSE TO SMPL SKELETON FROM JOINT POSITIONS
+        //    Uses forward-kinematics top-down pass.
+        //    frameData shape: [22][3] — world-space joint positions.
+        // ============================================================
+        const _worldRots = new Array(22); // accumulated world rotations per bone
+ 
+        function applyPoseToSMPL(frameData) {
+            if (!smplLoaded || !smplSkeleton) return;
+ 
+            const bones = smplSkeleton.bones;
+            const n     = Math.min(22, bones.length);
+ 
+            // ── ROOT BONE ────────────────────────────────────────────
+            // Translate so the pelvis matches the SMPL offset column.
+            // frameData[0] is in skeleton-space (centered at 0,0,0).
+            // The gltf.scene is already shifted by SMPL_OFFSET_X, so
+            // we feed the raw joint positions directly.
+            bones[0].position.set(
+                frameData[0][0],
+                frameData[0][1],
+                frameData[0][2]
+            );
+            bones[0].quaternion.identity();
+            _worldRots[0] = new THREE.Quaternion(); // identity
+ 
+            // ── CHILD BONES (top-down, parent before child) ──────────
+            for (let i = 1; i < n; i++) {
+                const p        = SMPL_PARENTS[i];
+                const Q_parent = _worldRots[p];
+ 
+                const restLocal = restLocalDirs[i];
+ 
+                // Skip degenerate zero-length rest bones (shouldn't happen)
+                if (restLocal.lengthSq() < 1e-6) {
+                    bones[i].quaternion.identity();
+                    _worldRots[i] = Q_parent.clone();
+                    continue;
+                }
+ 
+                // Rest direction of this bone in WORLD space
+                // = parent's accumulated world rotation × local rest dir
+                _v1.copy(restLocal).applyQuaternion(Q_parent);
+ 
+                // Target direction = frameData[i] - frameData[p] (world space)
+                _v2.set(
+                    frameData[i][0] - frameData[p][0],
+                    frameData[i][1] - frameData[p][1],
+                    frameData[i][2] - frameData[p][2]
+                );
+ 
+                if (_v2.lengthSq() < 1e-6) {
+                    bones[i].quaternion.identity();
+                    _worldRots[i] = Q_parent.clone();
+                    continue;
+                }
+                _v2.normalize();
+ 
+                // Q_needed rotates rest world dir → target world dir
+                const Q_needed = new THREE.Quaternion().setFromUnitVectors(_v1, _v2);
+ 
+                // Local rotation in parent's space:
+                //   world_rot_i = Q_parent × local_rot_i
+                //   local_rot_i = Q_parent⁻¹ × Q_needed
+                const localRot = Q_parent.clone().invert().multiply(Q_needed);
+                bones[i].quaternion.copy(localRot);
+ 
+                // Propagate world rotation to children
+                _worldRots[i] = Q_needed; // = Q_parent × localRot ✓
+            }
+ 
+            smplSkeleton.update();
+        }
+ 
+        // ============================================================
+        // 7. ANIMATION LOOP
+        // ============================================================
+        let motionData  = [];
         let currentFrame = 0;
-        let isPlaying = false;
+        let isPlaying    = false;
         let lastFrameTime = 0;
-
+ 
         const pA = new THREE.Vector3();
         const pB = new THREE.Vector3();
         const cameraTarget = new THREE.Vector3(0, 1, 0);
-
+ 
         function animate(timestamp) {
             requestAnimationFrame(animate);
-
+ 
             if (isPlaying && motionData.length > 0) {
-                if (timestamp - lastFrameTime > 33) { 
-                    const frameData = motionData[currentFrame];
-
-                    // ONLY update the robotic skeleton, completely bypassing the mesh math!
+                if (timestamp - lastFrameTime > 33) {  // ~30 fps
+                    const frameData = motionData[currentFrame]; // shape [22][3]
+ 
+                    // ── Update skeleton (offset to the right) ────────
                     for (let i = 0; i < maxPoints; i++) {
-                        jointMeshes[i].position.set(frameData[i][0], frameData[i][1], frameData[i][2]);
+                        jointMeshes[i].position.set(
+                            frameData[i][0] + SKELETON_OFFSET_X,
+                            frameData[i][1],
+                            frameData[i][2]
+                        );
                     }
-                    
-                    let boneIndex = 0;
+ 
+                    let boneIdx = 0;
                     for (let i = 0; i < boneConnections.length; i += 2) {
-                        const idxA = boneConnections[i];
-                        const idxB = boneConnections[i+1];
-
-                        pA.set(frameData[idxA][0], frameData[idxA][1], frameData[idxA][2]);
-                        pB.set(frameData[idxB][0], frameData[idxB][1], frameData[idxB][2]);
-
-                        const distance = pA.distanceTo(pB);
-                        const midPoint = pA.clone().lerp(pB, 0.5);
-
-                        const boneMesh = boneMeshes[boneIndex];
-                        boneMesh.position.copy(midPoint); 
-                        boneMesh.scale.set(1, 1, distance); 
-                        boneMesh.lookAt(pB); 
-                        
-                        boneIndex++;
+                        const iA = boneConnections[i], iB = boneConnections[i+1];
+                        pA.set(frameData[iA][0] + SKELETON_OFFSET_X, frameData[iA][1], frameData[iA][2]);
+                        pB.set(frameData[iB][0] + SKELETON_OFFSET_X, frameData[iB][1], frameData[iB][2]);
+ 
+                        const dist = pA.distanceTo(pB);
+                        const mid  = pA.clone().lerp(pB, 0.5);
+ 
+                        boneMeshes[boneIdx].position.copy(mid);
+                        boneMeshes[boneIdx].scale.set(1, 1, dist);
+                        boneMeshes[boneIdx].lookAt(pB);
+                        boneIdx++;
                     }
-                    
-                    const rootJoint = frameData[0];
-                    cameraTarget.lerp(new THREE.Vector3(rootJoint[0], rootJoint[1], rootJoint[2]), 0.1);
+ 
+                    // ── Drive the SMPL skinned mesh ───────────────────
+                    // frameData joints are raw (skeleton origin = 0,0,0).
+                    // The gltf.scene is positioned at SMPL_OFFSET_X so
+                    // we pass raw frameData — Three.js handles the offset.
+                    applyPoseToSMPL(frameData);
+ 
+                    // ── Camera follows root joint ─────────────────────
+                    const root = frameData[0];
+                    cameraTarget.lerp(new THREE.Vector3(root[0], root[1], root[2]), 0.1);
                     controls.target.copy(cameraTarget);
-
-                    if (currentFrame === 0) {
-                         camera.position.set(rootJoint[0], rootJoint[1] + 1, rootJoint[2] + 4);
-                    }
-
-                    currentFrame = (currentFrame + 1) % motionData.length; 
+ 
+                    currentFrame = (currentFrame + 1) % motionData.length;
                     lastFrameTime = timestamp;
                 }
             }
-            
-            controls.update(); 
+ 
+            controls.update();
             renderer.render(scene, camera);
         }
         animate(0);
-
+ 
         window.addEventListener('resize', () => {
             camera.aspect = window.innerWidth / window.innerHeight;
             camera.updateProjectionMatrix();
             renderer.setSize(window.innerWidth, window.innerHeight);
         });
-        
+ 
         // --- 5. WEBSOCKET PIPELINE ---
         const socketStatus = document.getElementById('socket-status');
         const statusText = document.getElementById('status');
