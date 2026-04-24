@@ -266,12 +266,37 @@
             // Pre-convert all 22 FD joints to SMPL scene local space
             const localJoints = frameData.map(j => toLocal(j[0], j[1], j[2]));
  
-            // ── ROOT BONE (no FD equivalent, park at pelvis position) ─
-            bones[0].position.copy(localJoints[0]);
-            bones[0].quaternion.identity();
-            _worldRots[0] = new THREE.Quaternion();
+            // ── COMPUTE ROOT ROTATION from hip / spine vectors ────────
+            // Right  = R_Hip(FD2) - L_Hip(FD1)
+            // Up     = Spine1(FD3) - Pelvis(FD0)
+            // Forward = cross(Right, Up)
+            const curRight = localJoints[2].clone().sub(localJoints[1]);
+            const curUp    = localJoints[3].clone().sub(localJoints[0]);
+            if (curRight.lengthSq() < 1e-6) curRight.copy(REST_RIGHT);
+            if (curUp.lengthSq()    < 1e-6) curUp.copy(REST_UP);
+            curRight.normalize();
  
-            // ── CHILD BONES ──────────────────────────────────────────
+            // Gram-Schmidt: remove right component from up so they're orthogonal
+            curUp.sub(curRight.clone().multiplyScalar(curUp.dot(curRight))).normalize();
+            const curForward = new THREE.Vector3().crossVectors(curRight, curUp);
+ 
+            // Delta rotation: rest frame → current frame
+            const mRest  = new THREE.Matrix4().makeBasis(REST_RIGHT, REST_UP, REST_FORWARD);
+            const mCur   = new THREE.Matrix4().makeBasis(curRight, curUp, curForward);
+            const rootQuat = new THREE.Quaternion().setFromRotationMatrix(
+                mCur.multiply(new THREE.Matrix4().copy(mRest).invert())
+            );
+ 
+            // ── ROOT BONE POSITION ────────────────────────────────────
+            // We want the Pelvis (bones[1]) to land on localJoints[0].
+            // Since: pelvis_world = root_pos + rootQuat × pelvisOffset
+            // => root_pos = localJoints[0] - rootQuat × pelvisOffset
+            const pelvisRot = restPelvisOffset.clone().applyQuaternion(rootQuat);
+            bones[0].position.copy(localJoints[0]).sub(pelvisRot);
+            bones[0].quaternion.copy(rootQuat);
+            _worldRots[0] = rootQuat.clone();
+ 
+            // ── CHILD BONES (top-down FK) ─────────────────────────────
             for (let i = 1; i < n; i++) {
                 const p         = GLB_PARENTS[i];
                 const Q_parent  = _worldRots[p];
@@ -283,16 +308,13 @@
                     continue;
                 }
  
-                // Rest direction of this bone in SMPL-local world space
                 _v1.copy(restLocal).applyQuaternion(Q_parent);
  
-                // Target: FD joint of this bone minus FD joint of parent
                 const myFD  = BONE_TO_FD[i];
                 const parFD = BONE_TO_FD[p];
                 _v2.copy(localJoints[myFD]).sub(localJoints[parFD]);
  
                 if (_v2.lengthSq() < 1e-6) {
-                    // Zero-length (e.g. hand bone shares FD index with wrist)
                     bones[i].quaternion.identity();
                     _worldRots[i] = Q_parent.clone();
                     continue;
@@ -300,8 +322,7 @@
                 _v2.normalize();
  
                 const Q_needed = new THREE.Quaternion().setFromUnitVectors(_v1, _v2);
-                const localRot = Q_parent.clone().invert().multiply(Q_needed);
-                bones[i].quaternion.copy(localRot);
+                bones[i].quaternion.copy(Q_parent.clone().invert().multiply(Q_needed));
                 _worldRots[i] = Q_needed;
             }
  
