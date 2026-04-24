@@ -169,25 +169,16 @@
                 if (timestamp - lastFrameTime > 33) { 
                     const frameData = motionData[currentFrame];
 
-                    // Update Spheres
+                    // Update Spheres (Only the Robotic Skeleton)
                     for (let i = 0; i < maxPoints; i++) {
-                        // 1. Original Underlying Skeleton Update
+                        // 1. Update your robotic skeleton (Positions)
                         jointMeshes[i].position.set(frameData[i][0], frameData[i][1], frameData[i][2]);
-                        
-                        // 2. SMPL MESH UPDATE (The IK-Bypass Hack)
-                        if (smplMesh && smplBones[i]) {
-                            // Grab the AI's exact absolute coordinate
-                            const targetWorldPos = new THREE.Vector3(frameData[i][0], frameData[i][1], frameData[i][2]);
-                            
-                            // Convert the absolute coordinate into a local offset so the skeleton doesn't shatter
-                            if (smplBones[i].parent) {
-                                smplBones[i].parent.updateMatrixWorld(); 
-                                smplBones[i].parent.worldToLocal(targetWorldPos);
-                            }
-                            
-                            // Force the bone to stretch to the exact AI position
-                            smplBones[i].position.copy(targetWorldPos);
-                        }
+                    }
+                    
+                    // Keep the Mesh in the scene, but offset it slightly so it stands "besides" the pose!
+                    if (smplMesh && currentFrame === 1) {
+                        // Move it 1.5 meters to the left so it doesn't overlap the robot
+                        smplMesh.position.set(-1.5, 0, 0); 
                     }
                     
                     // Update Cylinders
