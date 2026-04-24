@@ -38,6 +38,8 @@
 
     <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/GLTFLoader.js"></script>
     
     <script>
         // --- 1. SET UP THE 3D WORLD (WITH SHADOWS) ---
@@ -120,6 +122,35 @@
             scene.add(boneMesh);
             boneMeshes.push(boneMesh);
         }
+
+        // --- 3.5 LOAD SMPL MESH ---
+        let smplMesh = null;
+        let smplBones = [];
+
+        const gltfLoader = new THREE.GLTFLoader();
+        // CRITICAL: You must have a file named 'smpl.glb' in the same folder as this HTML file!
+        gltfLoader.load('smpl.glb', (gltf) => {
+            smplMesh = gltf.scene;
+            
+            // Extract all bones from the rigged mesh
+            smplMesh.traverse((child) => {
+                if (child.isMesh) {
+                    child.castShadow = true;
+                    // Make it semi-transparent to see the AI joints inside!
+                    child.material.transparent = true;
+                    child.material.opacity = 0.85; 
+                    child.material.color.setHex(0xaaccff);
+                }
+                if (child.isBone) {
+                    smplBones.push(child);
+                }
+            });
+
+            scene.add(smplMesh);
+            console.log("SMPL Mesh Loaded. Bones found:", smplBones.length);
+        }, undefined, (error) => {
+            console.error("Could not load smpl.glb. Ensure the file is in the root directory.", error);
+        });
         
         // --- 4. ANIMATION & STATE LOGIC ---
         let motionData = []; 
@@ -140,7 +171,23 @@
 
                     // Update Spheres
                     for (let i = 0; i < maxPoints; i++) {
+                        // 1. Original Underlying Skeleton Update
                         jointMeshes[i].position.set(frameData[i][0], frameData[i][1], frameData[i][2]);
+                        
+                        // 2. SMPL MESH UPDATE (The IK-Bypass Hack)
+                        if (smplMesh && smplBones[i]) {
+                            // Grab the AI's exact absolute coordinate
+                            const targetWorldPos = new THREE.Vector3(frameData[i][0], frameData[i][1], frameData[i][2]);
+                            
+                            // Convert the absolute coordinate into a local offset so the skeleton doesn't shatter
+                            if (smplBones[i].parent) {
+                                smplBones[i].parent.updateMatrixWorld(); 
+                                smplBones[i].parent.worldToLocal(targetWorldPos);
+                            }
+                            
+                            // Force the bone to stretch to the exact AI position
+                            smplBones[i].position.copy(targetWorldPos);
+                        }
                     }
 
                     // Update Cylinders
