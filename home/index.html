@@ -83,6 +83,7 @@
         const gridHelper = new THREE.GridHelper(100, 100, 0xcccccc, 0xcccccc);
         scene.add(gridHelper);
 
+        
 
         // ============================================================
         // 3. SKELETON (placed at x = +1.5, right side)
@@ -164,19 +165,11 @@
         // 5. SMPL RIGGED MESH (placed at x = -1.5, left side)
         // ============================================================
         const SMPL_OFFSET_X = -1.5;
-        const SMPL_OFFSET_Y =  0.08; // lift mesh so feet sit on the floor
  
         let smplSkinnedMesh = null;
         let smplSkeleton    = null;
         let restLocalDirs   = [];
         let smplLoaded      = false;
-        let restPelvisOffset = new THREE.Vector3(); // Pelvis bone's local offset from Root in T-pose
- 
-        // In SMPL T-pose exported from Blender (Z-up → Y-up = -90°X scene rotation),
-        // the bone-local rest orientation (Blender Z-up space) is:
-        const REST_RIGHT   = new THREE.Vector3(1,  0,  0);
-        const REST_UP      = new THREE.Vector3(0,  0,  1);
-        const REST_FORWARD = new THREE.Vector3(0, -1,  0); // cross(RIGHT, UP)
  
         // This matrix converts FloodDiffusion world-space joint positions
         // into the SMPL scene's LOCAL space (fixes Blender Z-up vs Y-up mismatch)
@@ -204,14 +197,17 @@
  
             if (!smplSkinnedMesh) {
                 const el = document.getElementById('smplStatus'); if (el) el.textContent = "SMPL Mesh: ⚠️ Not rigged";
-                gltf.scene.position.set(SMPL_OFFSET_X, SMPL_OFFSET_Y, 0);
+                gltf.scene.position.set(SMPL_OFFSET_X, 0, 0);
+                scene.add(gltf.scene);
+                return;
             }
  
             // ── Place scene, then extract its rotation ────────────────
             // Blender exports with a -90° X rotation to convert Z-up → Y-up.
             // We need the inverse of that rotation to bring FloodDiffusion's
             // Y-up joint positions into the bone's local coordinate space.
-            gltf.scene.position.set(SMPL_OFFSET_X, SMPL_OFFSET_Y, 0);
+            gltf.scene.position.set(SMPL_OFFSET_X, 0, 0);
+            scene.add(gltf.scene);
             gltf.scene.updateWorldMatrix(true, true);
  
             // Extract only the rotation part (no translation) of the inverse
@@ -222,12 +218,8 @@
             console.log("[SMPL] Bones:", smplSkeleton.bones.map((b, i) => `${i}: ${b.name}`).join(', '));
  
             // ── Capture rest-pose local bone directions ───────────────
+            // IMPORTANT: read AFTER the scene is added so matrixWorld is correct
             restLocalDirs = smplSkeleton.bones.map(bone => bone.position.clone().normalize());
- 
-            // ── Capture pelvis offset from root in rest pose ──────────
-            // bones[1] is Pelvis; its local position = offset from Root (bones[0]).
-            // We subtract this each frame so the pelvis lands exactly on FD joint 0.
-            restPelvisOffset.copy(smplSkeleton.bones[1].position);
  
             smplLoaded = true;
             const el = document.getElementById('smplStatus');
@@ -266,37 +258,12 @@
             // Pre-convert all 22 FD joints to SMPL scene local space
             const localJoints = frameData.map(j => toLocal(j[0], j[1], j[2]));
  
-            // ── COMPUTE ROOT ROTATION from hip / spine vectors ────────
-            // Right  = R_Hip(FD2) - L_Hip(FD1)
-            // Up     = Spine1(FD3) - Pelvis(FD0)
-            // Forward = cross(Right, Up)
-            const curRight = localJoints[2].clone().sub(localJoints[1]);
-            const curUp    = localJoints[3].clone().sub(localJoints[0]);
-            if (curRight.lengthSq() < 1e-6) curRight.copy(REST_RIGHT);
-            if (curUp.lengthSq()    < 1e-6) curUp.copy(REST_UP);
-            curRight.normalize();
+            // ── ROOT BONE (no FD equivalent, park at pelvis position) ─
+            bones[0].position.copy(localJoints[0]);
+            bones[0].quaternion.identity();
+            _worldRots[0] = new THREE.Quaternion();
  
-            // Gram-Schmidt: remove right component from up so they're orthogonal
-            curUp.sub(curRight.clone().multiplyScalar(curUp.dot(curRight))).normalize();
-            const curForward = new THREE.Vector3().crossVectors(curRight, curUp);
- 
-            // Delta rotation: rest frame → current frame
-            const mRest  = new THREE.Matrix4().makeBasis(REST_RIGHT, REST_UP, REST_FORWARD);
-            const mCur   = new THREE.Matrix4().makeBasis(curRight, curUp, curForward);
-            const rootQuat = new THREE.Quaternion().setFromRotationMatrix(
-                mCur.multiply(new THREE.Matrix4().copy(mRest).invert())
-            );
- 
-            // ── ROOT BONE POSITION ────────────────────────────────────
-            // We want the Pelvis (bones[1]) to land on localJoints[0].
-            // Since: pelvis_world = root_pos + rootQuat × pelvisOffset
-            // => root_pos = localJoints[0] - rootQuat × pelvisOffset
-            const pelvisRot = restPelvisOffset.clone().applyQuaternion(rootQuat);
-            bones[0].position.copy(localJoints[0]).sub(pelvisRot);
-            bones[0].quaternion.copy(rootQuat);
-            _worldRots[0] = rootQuat.clone();
- 
-            // ── CHILD BONES (top-down FK) ─────────────────────────────
+            // ── CHILD BONES ──────────────────────────────────────────
             for (let i = 1; i < n; i++) {
                 const p         = GLB_PARENTS[i];
                 const Q_parent  = _worldRots[p];
@@ -308,13 +275,16 @@
                     continue;
                 }
  
+                // Rest direction of this bone in SMPL-local world space
                 _v1.copy(restLocal).applyQuaternion(Q_parent);
  
+                // Target: FD joint of this bone minus FD joint of parent
                 const myFD  = BONE_TO_FD[i];
                 const parFD = BONE_TO_FD[p];
                 _v2.copy(localJoints[myFD]).sub(localJoints[parFD]);
  
                 if (_v2.lengthSq() < 1e-6) {
+                    // Zero-length (e.g. hand bone shares FD index with wrist)
                     bones[i].quaternion.identity();
                     _worldRots[i] = Q_parent.clone();
                     continue;
@@ -322,7 +292,8 @@
                 _v2.normalize();
  
                 const Q_needed = new THREE.Quaternion().setFromUnitVectors(_v1, _v2);
-                bones[i].quaternion.copy(Q_parent.clone().invert().multiply(Q_needed));
+                const localRot = Q_parent.clone().invert().multiply(Q_needed);
+                bones[i].quaternion.copy(localRot);
                 _worldRots[i] = Q_needed;
             }
  
@@ -399,7 +370,7 @@
             renderer.setSize(window.innerWidth, window.innerHeight);
         });
  
-        
+
         // --- 5. WEBSOCKET PIPELINE ---
         const socketStatus = document.getElementById('socket-status');
         const statusText = document.getElementById('status');
